@@ -1,0 +1,135 @@
+name: Deploy to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - main
+      - development
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up SSH for AWS Lightsail
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.LIGHTSAIL_KEY }}" > lightsail_key.pem
+          chmod 600 lightsail_key.pem
+          eval "$(ssh-agent -s)"
+          ssh-add lightsail_key.pem
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Handle backup of Website_master
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            cd /opt/bitnami/nginx/html
+
+            # Step 1: If Website_master_backup2 exists, remove it
+            if [ -d Website_master_backup2 ]; then
+              rm -rf Website_master_backup2
+            fi
+
+            # Step 2: If Website_master_backup1 exists, rename it to Website_master_backup2
+            if [ -d Website_master_backup1 ]; then
+              mv Website_master_backup1 Website_master_backup2
+            fi
+
+            # Step 3: If Website_master exists, copy it to Website_master_backup1
+            if [ -d Website_master ]; then
+              cp -r Website_master Website_master_backup1
+            fi
+          "
+          
+      - name: Create temp directory and clone repository
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            cd /opt/bitnami/nginx/html
+            mkdir Website_master_temp &&
+            cd Website_master_temp &&
+            # Clone the repo and checkout the appropriate branch
+            git clone your_git_clone_ssh_command &&
+            cd Website_master &&
+            git checkout ${{ github.ref_name }}
+          "
+
+      - name: Run Composer and NPM commands on Lightsail instance
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            source /home/bitnami/.nvm/nvm.sh &&
+            cd /opt/bitnami/nginx/html/Website_master_temp/Website_master &&
+            composer update &&
+            npm install &&
+            npm run build
+          "
+
+      - name: Remove unnecessary files
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            cd /opt/bitnami/nginx/html/Website_master_temp/Website_master &&
+            rm -rf node_modules &&
+            rm -rf .ddev &&
+            rm -rf .husky &&
+            rm -rf .git &&
+            rm -rf .github &&
+            rm -f .gitignore
+            rm -f .env.example
+            rm -f .DS_Store
+            rm -f icon-builder.mjs
+            rm -f phpcs.xml
+            rm -f phpunit.xml.dist
+          "
+      
+      - name: Copy .env file from configs
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            cp /home/bitnami/shared/configs/.env /opt/bitnami/nginx/html/Website_master_temp/Website_master/.env &&
+            echo '.env file copied from configs to Website_master'
+          "
+
+      - name: Remove default uploads folder and copy new uploads folder
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            # Remove the default uploads folder
+            rm -rf /opt/bitnami/nginx/html/Website_master_temp/Website_master/web/app/uploads &&
+            # Copy the new uploads folder from shared directory
+            cp -r /home/bitnami/shared/uploads /opt/bitnami/nginx/html/Website_master_temp/Website_master/web/app/uploads &&
+            echo 'Default uploads folder removed and new uploads folder copied'
+          "
+
+      - name: Set correct file and directory permissions
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            TARGET='/opt/bitnami/nginx/html/Website_master_temp/Website_master'
+            # Set ownership of all files and directories
+            sudo chown -R bitnami:daemon \$TARGET
+            # Set directory permissions to 775
+            sudo find \$TARGET -type d -exec chmod 775 {} \;
+            # Set file permissions to 664
+            sudo find \$TARGET -type f -exec chmod 664 {} \;
+            # Set .env file permissions to 640
+            sudo chmod 640 \$TARGET/.env
+            echo 'Permissions set for files, directories, and .env file in Website_master'
+          "
+
+      - name: Remove old Website_master and move the new Website_master to root directory
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "
+            # Remove the default Website_master folder
+            rm -rf /opt/bitnami/nginx/html/Website_master &&
+            # Move the new Website_master folder from Website_master_temp to the root directory
+            mv /opt/bitnami/nginx/html/Website_master_temp/Website_master /opt/bitnami/nginx/html/
+            # Delete the Website_master_temp folder
+            rm -rf /opt/bitnami/nginx/html/Website_master_temp &&
+            echo 'Default Website_master folder removed and new Website_master folder copied'
+          "
+
+      - name: Restart Nginx on AWS Lightsail
+        run: |
+          ssh -o StrictHostKeyChecking=no -i lightsail_key.pem bitnami@${{ secrets.LIGHTSAIL_IP }} "sudo /opt/bitnami/ctlscript.sh restart nginx"
+
+      - name: Deployment completed Successfully
+        run: echo "Deployment completed successfully!!!"
